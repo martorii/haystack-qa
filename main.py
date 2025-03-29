@@ -1,4 +1,3 @@
-import os
 from typing import List
 from dotenv import load_dotenv
 load_dotenv()
@@ -32,7 +31,7 @@ def create_document_store(path_to_documents: List[str]):
     p.add_component(instance=PyPDFToDocument(), name="converter")
     p.add_component(instance=DocumentCleaner(), name="cleaner")
     p.add_component(instance=DocumentSplitter(
-        split_by="period", split_length=6, split_overlap=2
+        split_by="period", split_length=3, split_overlap=1
     ), name="splitter")
     p.add_component(instance=document_embedder,  name="embedder")
     p.add_component(instance=DocumentWriter(document_store=_document_store), name="writer")
@@ -58,14 +57,19 @@ document_store = create_document_store(['docs/attention.pdf'])
 
 def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline:
     # Create retrievers
-    bm25_retriever = InMemoryBM25Retriever(document_store)
-    embedding_retriever = InMemoryEmbeddingRetriever(document_store)
+    bm25_retriever = InMemoryBM25Retriever(document_store, scale_score=True, top_k=5)
+    embedding_retriever = InMemoryEmbeddingRetriever(document_store, top_k=5)
 
     # Define embedder (same model as for the document store)
     text_embedder = SentenceTransformersTextEmbedder()
+    text_embedder.warm_up()
 
     # Create joiner
-    document_joiner = DocumentJoiner()
+    document_joiner = DocumentJoiner(
+        join_mode="merge",
+        weights=[0.7, 0.3],
+        sort_by_score=True
+    )
 
     # Rank both retrievers
     ranker = TransformersSimilarityRanker()
@@ -75,12 +79,12 @@ def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline
     hybrid_retrieval.add_component("embedding_retriever", embedding_retriever)
     hybrid_retrieval.add_component("bm25_retriever", bm25_retriever)
     hybrid_retrieval.add_component("document_joiner", document_joiner)
-    hybrid_retrieval.add_component("ranker", ranker)
+    # hybrid_retrieval.add_component("ranker", ranker)
 
     hybrid_retrieval.connect("text_embedder", "embedding_retriever")
     hybrid_retrieval.connect("bm25_retriever", "document_joiner")
     hybrid_retrieval.connect("embedding_retriever", "document_joiner")
-    hybrid_retrieval.connect("document_joiner", "ranker")
+    # hybrid_retrieval.connect("document_joiner", "ranker")
 
     return hybrid_retrieval
 
@@ -93,14 +97,18 @@ def get_top_k_results(query: str, retriever: Pipeline, top_k: int = 2) -> List[s
         {
             "text_embedder": {"text": query},
             "bm25_retriever": {"query": query},
-            "ranker": {"query": query, "top_k": top_k}
+            # "ranker": {"query": query, "top_k": top_k}
         }
     )
+    print("Printing raw results from retriever")
+    for doc in result['document_joiner']['documents']:
+        print(f"{doc.score}: {doc.content}")
+        print("####")
     return [
         document.content for document in result['ranker']['documents']
     ]
 
-query = "What is the BLUE score achieved by the transformer?"
+query = "What are positional encodings?"
 top_k_results = get_top_k_results(
     query=query,
     retriever=hybrid_retriever
@@ -188,14 +196,14 @@ generation_pipeline.connect("builder.prompt", "verbose_generator.prompt")
 # generation_pipeline.connect("verbose_generator.replies", "formatter")
 # generation_pipeline.connect("formatter.prompt", "json_generator.prompt")
 
-print(
-    generation_pipeline.run(
-        {
-            'builder': {
-                "question": query,
-                "passage_1": top_k_results[0],
-                "passage_2": top_k_results[1]
-            }
-        }
-    )
-)
+# print(
+#     generation_pipeline.run(
+#         {
+#             'builder': {
+#                 "question": query,
+#                 "passage_1": top_k_results[0],
+#                 "passage_2": top_k_results[1]
+#             }
+#         }
+#     )
+# )
