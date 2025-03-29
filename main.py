@@ -57,8 +57,15 @@ document_store = create_document_store(['docs/attention.pdf'])
 
 def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline:
     # Create retrievers
-    bm25_retriever = InMemoryBM25Retriever(document_store, scale_score=True, top_k=5)
-    embedding_retriever = InMemoryEmbeddingRetriever(document_store, top_k=5)
+    bm25_retriever = InMemoryBM25Retriever(
+        document_store,
+        scale_score=True,
+        top_k=5
+    )
+    embedding_retriever = InMemoryEmbeddingRetriever(
+        document_store,
+        top_k=5
+    )
 
     # Define embedder (same model as for the document store)
     text_embedder = SentenceTransformersTextEmbedder()
@@ -71,6 +78,57 @@ def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline
         sort_by_score=True
     )
 
+    # Create ThresholdFilter
+    from haystack import component
+    from haystack.dataclasses import Document
+    from typing import List, Optional, Dict, Any
+
+    @component
+    class ThresholdFilter:
+        """
+        Filter documents based on a specified threshold value.
+
+        This component examines a specific field in each document (e.g., score,
+        confidence) and only keeps documents that meet or exceed the threshold.
+        """
+
+        def __init__(self, threshold: float = 0.5, field_name: str = "score"):
+            """
+            Initialize the ThresholdFilter component.
+
+            Args:
+                threshold: The minimum value to keep a document (default: 0.5)
+                field_name: The metadata field to check against the threshold (default: "score")
+            """
+            self.threshold = threshold
+            self.field_name = field_name
+
+        @component.output_types(documents=List[Document])
+        def run(self, documents: List[Document]) -> Dict[str, List[Document]]:
+            """
+            Filter the input documents based on the threshold.
+
+            Args:
+                documents: List of documents to filter
+
+            Returns:
+                Dict containing the filtered documents
+            """
+            filtered_docs = []
+
+            for doc in documents:
+                if hasattr(doc, self.field_name):
+                    field_value = getattr(doc, self.field_name)
+                    if field_value >= self.threshold:
+                        filtered_docs.append(doc)
+                else:
+                    raise ValueError(f"{self.field_name} is not an attribute of the input.")
+
+            return {"documents": filtered_docs}
+
+    threshold_filter = ThresholdFilter(
+        threshold=0.6
+    )
     # Rank both retrievers
     ranker = TransformersSimilarityRanker()
 
@@ -79,11 +137,13 @@ def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline
     hybrid_retrieval.add_component("embedding_retriever", embedding_retriever)
     hybrid_retrieval.add_component("bm25_retriever", bm25_retriever)
     hybrid_retrieval.add_component("document_joiner", document_joiner)
+    hybrid_retrieval.add_component("threshold_filter", threshold_filter)
     # hybrid_retrieval.add_component("ranker", ranker)
 
     hybrid_retrieval.connect("text_embedder", "embedding_retriever")
     hybrid_retrieval.connect("bm25_retriever", "document_joiner")
     hybrid_retrieval.connect("embedding_retriever", "document_joiner")
+    hybrid_retrieval.connect("document_joiner", "threshold_filter")
     # hybrid_retrieval.connect("document_joiner", "ranker")
 
     return hybrid_retrieval
@@ -101,7 +161,7 @@ def get_top_k_results(query: str, retriever: Pipeline, top_k: int = 2) -> List[s
         }
     )
     print("Printing raw results from retriever")
-    for doc in result['document_joiner']['documents']:
+    for doc in result['threshold_filter']['documents']:
         print(f"{doc.score}: {doc.content}")
         print("####")
     return [
