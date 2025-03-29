@@ -1,0 +1,7 @@
+haystack-ai
+python-dotenv
+huggingface-hub
+pypdf
+sentence-transformers
+accelerate
+nltk
