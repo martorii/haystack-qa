@@ -19,6 +19,7 @@ from haystack.components.retrievers.in_memory import (
 from haystack.components.joiners import DocumentJoiner
 from haystack.components.rankers import TransformersSimilarityRanker
 from pathlib import Path
+import time
 
 
 def create_document_store(path_to_documents: List[str]):
@@ -51,10 +52,6 @@ def create_document_store(path_to_documents: List[str]):
     return _document_store
 
 
-# Create document store
-document_store = create_document_store(['docs/attention.pdf'])
-
-
 def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline:
     # Create retrievers
     bm25_retriever = InMemoryBM25Retriever(
@@ -84,7 +81,7 @@ def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline
     from typing import List, Optional, Dict, Any
 
     @component
-    class ThresholdFilter:
+    class DocumentFilter:
         """
         Filter documents based on a specified threshold value.
 
@@ -92,7 +89,7 @@ def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline
         confidence) and only keeps documents that meet or exceed the threshold.
         """
 
-        def __init__(self, threshold: float = 0.5, field_name: str = "score"):
+        def __init__(self, threshold: float = 0.5, field_name: str = "score", top_k: int = 2):
             """
             Initialize the ThresholdFilter component.
 
@@ -102,11 +99,12 @@ def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline
             """
             self.threshold = threshold
             self.field_name = field_name
+            self.top_k = top_k
 
         @component.output_types(documents=List[Document])
         def run(self, documents: List[Document]) -> Dict[str, List[Document]]:
             """
-            Filter the input documents based on the threshold.
+            Filter the input documents based on the threshold. Return only top_k.
 
             Args:
                 documents: List of documents to filter
@@ -124,35 +122,35 @@ def create_retriever_pipeline(document_store: InMemoryDocumentStore) -> Pipeline
                 else:
                     raise ValueError(f"{self.field_name} is not an attribute of the input.")
 
+            # Return only top_k
+            filtered_docs = filtered_docs[:self.top_k] if len(filtered_docs) >= self.top_k else filtered_docs
             return {"documents": filtered_docs}
 
-    threshold_filter = ThresholdFilter(
-        threshold=0.6
+    document_filter = DocumentFilter(
+        threshold=0.6,
+        top_k=2
     )
     # Rank both retrievers
-    ranker = TransformersSimilarityRanker()
+    # ranker = TransformersSimilarityRanker()
 
     hybrid_retrieval = Pipeline()
     hybrid_retrieval.add_component("text_embedder", text_embedder)
     hybrid_retrieval.add_component("embedding_retriever", embedding_retriever)
     hybrid_retrieval.add_component("bm25_retriever", bm25_retriever)
     hybrid_retrieval.add_component("document_joiner", document_joiner)
-    hybrid_retrieval.add_component("threshold_filter", threshold_filter)
+    hybrid_retrieval.add_component("document_filter", document_filter)
     # hybrid_retrieval.add_component("ranker", ranker)
 
     hybrid_retrieval.connect("text_embedder", "embedding_retriever")
     hybrid_retrieval.connect("bm25_retriever", "document_joiner")
     hybrid_retrieval.connect("embedding_retriever", "document_joiner")
-    hybrid_retrieval.connect("document_joiner", "threshold_filter")
+    hybrid_retrieval.connect("document_joiner", "document_filter")
     # hybrid_retrieval.connect("document_joiner", "ranker")
 
     return hybrid_retrieval
 
 
-hybrid_retriever = create_retriever_pipeline(document_store)
-
-
-def get_top_k_results(query: str, retriever: Pipeline, top_k: int = 2) -> List[str]:
+def get_top_k_results(query: str, retriever: Pipeline) -> List[str]:
     result = retriever.run(
         {
             "text_embedder": {"text": query},
@@ -160,23 +158,30 @@ def get_top_k_results(query: str, retriever: Pipeline, top_k: int = 2) -> List[s
             # "ranker": {"query": query, "top_k": top_k}
         }
     )
-    print("Printing raw results from retriever")
-    for doc in result['threshold_filter']['documents']:
-        print(f"{doc.score}: {doc.content}")
-        print("####")
-    return [
-        document.content for document in result['ranker']['documents']
-    ]
+    return result['document_filter']['documents']
 
-query = "What are positional encodings?"
+
+start = time.time()
+
+# What to search for
+query = "What is the computational complexity of the transformer model"
+
+# Create document store
+document_store = create_document_store(['docs/attention.pdf'])
+
+# Create pipeline to extract best documents
+hybrid_retriever = create_retriever_pipeline(document_store)
+
+# Extract best documents
 top_k_results = get_top_k_results(
     query=query,
     retriever=hybrid_retriever
 )
 
-for result in top_k_results:
-    print(result)
-    print('###')
+# print("Printing raw results from retriever")
+# for doc in top_k_results:
+#     print(f"{doc.score}: {doc.content}")
+#     print("####")
 
 # Create PromptBuilder
 from haystack.components.builders import PromptBuilder
@@ -256,14 +261,18 @@ generation_pipeline.connect("builder.prompt", "verbose_generator.prompt")
 # generation_pipeline.connect("verbose_generator.replies", "formatter")
 # generation_pipeline.connect("formatter.prompt", "json_generator.prompt")
 
-# print(
-#     generation_pipeline.run(
-#         {
-#             'builder': {
-#                 "question": query,
-#                 "passage_1": top_k_results[0],
-#                 "passage_2": top_k_results[1]
-#             }
-#         }
-#     )
-# )
+print(
+    generation_pipeline.run(
+        {
+            'builder': {
+                "question": query,
+                "passage_1": top_k_results[0],
+                "passage_2": top_k_results[1]
+            }
+        }
+    )
+)
+
+stop = time.time()
+elapsed_time = stop - start
+print(f"Pipeline took {elapsed_time:.6f} seconds to run")
